@@ -31,6 +31,16 @@ pub fn git(root: &Utf8PathBuf, args: &[&str]) -> Result<(ExitStatus, String, Str
     ))
 }
 
+pub fn git_repository_root(path: &Utf8PathBuf) -> Result<Utf8PathBuf, Error> {
+    let (_, out, err) = git(path, &["rev-parse", "--show-toplevel"])?;
+
+    if err.contains("not a git repository") {
+        return Err(Error::NotGit);
+    }
+
+    Ok(Utf8PathBuf::from(out))
+}
+
 #[derive(Debug, Parser)]
 #[clap(next_help_heading = "GIT OPTIONS")]
 pub struct GitOpt {
@@ -102,173 +112,178 @@ pub struct GitOpt {
 impl GitOpt {
     pub fn validate(
         &self,
-        root: &Utf8PathBuf,
+        roots: &[Utf8PathBuf],
         config: &WorkspaceConfig,
-    ) -> Result<Option<String>, Error> {
-        let mut ret = None;
+    ) -> Result<Map<Utf8PathBuf, String>, Error> {
+        let mut branches = Map::new();
 
         if !self.no_git_commit {
-            let (_, out, err) = git(root, &["rev-list", "--count", "--all", "--max-count=1"])?;
+            for root in roots {
+                let (_, out, err) = git(root, &["rev-list", "--count", "--all", "--max-count=1"])?;
 
-            if err.contains("not a git repository") {
-                return Err(Error::NotGit);
-            }
+                if err.contains("not a git repository") {
+                    return Err(Error::NotGit);
+                }
 
-            if out == "0" {
-                return Err(Error::NoCommits);
-            }
+                if out == "0" {
+                    return Err(Error::NoCommits);
+                }
 
-            let (_, branch, _) = git(root, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+                let (_, branch, _) = git(root, &["rev-parse", "--abbrev-ref", "HEAD"])?;
 
-            if branch == "HEAD" {
-                return Err(Error::NotBranch);
-            }
+                if branch == "HEAD" {
+                    return Err(Error::NotBranch);
+                }
 
-            ret = Some(branch.clone());
+                branches.insert(root.clone(), branch.clone());
 
-            // Get the final `allow_branch` value
-            let allow_branch_default_value = String::from("master");
-            let allow_branch = self.allow_branch.as_ref().unwrap_or_else(|| {
-                config
-                    .allow_branch
-                    .as_ref()
-                    .unwrap_or(&allow_branch_default_value)
-            });
-
-            // Treat `main` as `master`
-            let test_branch = if branch == "main" && allow_branch.as_str() == "master" {
-                "master".into()
-            } else {
-                branch.clone()
-            };
-
-            let pattern = Glob::new(allow_branch)?;
-
-            if !pattern.compile_matcher().is_match(test_branch) {
-                return Err(Error::BranchNotAllowed {
-                    branch,
-                    pattern: pattern.glob().to_string(),
+                // Get the final `allow_branch` value
+                let allow_branch_default_value = String::from("master");
+                let allow_branch = self.allow_branch.as_ref().unwrap_or_else(|| {
+                    config
+                        .allow_branch
+                        .as_ref()
+                        .unwrap_or(&allow_branch_default_value)
                 });
-            }
 
-            if !self.no_git_push {
-                let remote_branch = format!("{}/{}", self.git_remote, branch);
+                // Treat `main` as `master`
+                let test_branch = if branch == "main" && allow_branch.as_str() == "master" {
+                    "master".into()
+                } else {
+                    branch.clone()
+                };
 
-                let (_, out, _) = git(
-                    root,
-                    &[
-                        "show-ref",
-                        "--verify",
-                        &format!("refs/remotes/{}", remote_branch),
-                    ],
-                )?;
+                let pattern = Glob::new(allow_branch)?;
 
-                if out.is_empty() {
-                    return Err(Error::NoRemote {
-                        remote: self.git_remote.clone(),
+                if !pattern.compile_matcher().is_match(test_branch) {
+                    return Err(Error::BranchNotAllowed {
                         branch,
+                        pattern: pattern.glob().to_string(),
                     });
                 }
 
-                git(root, &["remote", "update"])?;
+                if !self.no_git_push {
+                    let remote_branch = format!("{}/{}", self.git_remote, branch);
 
-                let (_, out, _) = git(
-                    root,
-                    &[
-                        "rev-list",
-                        "--left-only",
-                        "--count",
-                        &format!("{}...{}", remote_branch, branch),
-                    ],
-                )?;
+                    let (_, out, _) = git(
+                        root,
+                        &[
+                            "show-ref",
+                            "--verify",
+                            &format!("refs/remotes/{}", remote_branch),
+                        ],
+                    )?;
 
-                if out != "0" {
-                    return Err(Error::BehindRemote {
-                        branch,
-                        upstream: remote_branch,
-                    });
+                    if out.is_empty() {
+                        return Err(Error::NoRemote {
+                            remote: self.git_remote.clone(),
+                            branch,
+                        });
+                    }
+
+                    git(root, &["remote", "update"])?;
+
+                    let (_, out, _) = git(
+                        root,
+                        &[
+                            "rev-list",
+                            "--left-only",
+                            "--count",
+                            &format!("{}...{}", remote_branch, branch),
+                        ],
+                    )?;
+
+                    if out != "0" {
+                        return Err(Error::BehindRemote {
+                            branch,
+                            upstream: remote_branch,
+                        });
+                    }
                 }
             }
         }
 
-        Ok(ret)
+        Ok(branches)
     }
 
     pub fn commit(
         &self,
-        root: &Utf8PathBuf,
+        roots: &[Utf8PathBuf],
         new_version: &Option<Version>,
         new_versions: &Map<String, Version>,
-        branch: Option<String>,
+        branches: &Map<Utf8PathBuf, String>,
         config: &WorkspaceConfig,
     ) -> Result<(), Error> {
         if !self.no_git_commit {
-            info!("version", "committing changes");
+            for root in roots {
+                info!("version", format!("committing changes in {}", root));
 
-            let branch = branch.expect(INTERNAL_ERR);
-            let added = git(root, &["add", "-u"])?;
+                let branch = branches.get(root).expect(INTERNAL_ERR);
+                let added = git(root, &["add", "-u"])?;
 
-            if !added.0.success() {
-                return Err(Error::NotAdded(added.1, added.2));
-            }
-
-            let mut args = vec!["commit".to_string()];
-
-            if self.amend {
-                args.push("--amend".to_string());
-                args.push("--no-edit".to_string());
-            } else {
-                args.push("-m".to_string());
-
-                let mut msg = "Release %v";
-
-                if let Some(supplied) = &self.message {
-                    msg = supplied;
+                if !added.0.success() {
+                    return Err(Error::NotAdded(added.1, added.2));
                 }
 
-                let mut msg = self.commit_msg(msg, new_versions);
+                let mut args = vec!["commit".to_string()];
 
-                msg = msg.replace(
-                    "%v",
-                    &new_version
-                        .as_ref()
-                        .map_or("independent packages".to_string(), |x| format!("{}", x)),
-                );
+                if self.amend {
+                    args.push("--amend".to_string());
+                    args.push("--no-edit".to_string());
+                } else {
+                    args.push("-m".to_string());
 
-                args.push(msg);
-            }
+                    let mut msg = "Release %v";
 
-            let committed = git(root, &args.iter().map(|x| x.as_str()).collect::<Vec<_>>())?;
+                    if let Some(supplied) = &self.message {
+                        msg = supplied;
+                    }
 
-            if !committed.0.success() {
-                return Err(Error::NotCommitted(committed.1, committed.2));
-            }
+                    let mut msg = self.commit_msg(msg, new_versions);
 
-            if !self.no_git_tag {
-                info!("version", "tagging");
+                    msg = msg.replace(
+                        "%v",
+                        &new_version
+                            .as_ref()
+                            .map_or("independent packages".to_string(), |x| format!("{}", x)),
+                    );
 
-                if !self.no_global_tag {
-                    if let Some(version) = new_version {
-                        let tag = format!("{}{}", &self.tag_prefix, version);
-                        self.tag(root, &tag, &tag)?;
+                    args.push(msg);
+                }
+
+                let committed = git(root, &args.iter().map(|x| x.as_str()).collect::<Vec<_>>())?;
+
+                if !committed.0.success() {
+                    return Err(Error::NotCommitted(committed.1, committed.2));
+                }
+
+                if !self.no_git_tag {
+                    info!("version", format!("tagging in {}", root));
+
+                    if !self.no_global_tag {
+                        if let Some(version) = new_version {
+                            let tag = format!("{}{}", &self.tag_prefix, version);
+                            self.tag(root, &tag, &tag)?;
+                        }
+                    }
+
+                    if !(self.no_individual_tags || config.no_individual_tags.unwrap_or_default()) {
+                        for (p, v) in new_versions {
+                            let tag =
+                                format!("{}{}", self.individual_tag_prefix.replace("%n", p), v);
+                            self.tag(root, &tag, &tag)?;
+                        }
                     }
                 }
 
-                if !(self.no_individual_tags || config.no_individual_tags.unwrap_or_default()) {
-                    for (p, v) in new_versions {
-                        let tag = format!("{}{}", self.individual_tag_prefix.replace("%n", p), v);
-                        self.tag(root, &tag, &tag)?;
+                if !self.no_git_push {
+                    info!("git", format!("pushing from {}", root));
+
+                    let pushed = git(root, &["push", "--follow-tags", &self.git_remote, branch])?;
+
+                    if !pushed.0.success() {
+                        return Err(Error::NotPushed(pushed.1, pushed.2));
                     }
-                }
-            }
-
-            if !self.no_git_push {
-                info!("git", "pushing");
-
-                let pushed = git(root, &["push", "--follow-tags", &self.git_remote, &branch])?;
-
-                if !pushed.0.success() {
-                    return Err(Error::NotPushed(pushed.1, pushed.2));
                 }
             }
         }

@@ -1,6 +1,6 @@
 use crate::utils::{
-    cargo, change_versions, info, read_config, ChangeData, ChangeOpt, Error, GitOpt, Pkg, Result,
-    WorkspaceConfig, INTERNAL_ERR,
+    cargo, change_versions, git_repository_root, info, read_config, ChangeData, ChangeOpt, Error,
+    GitOpt, Pkg, Result, WorkspaceConfig, INTERNAL_ERR,
 };
 
 use cargo_metadata::Metadata;
@@ -81,7 +81,25 @@ pub struct VersionOpt {
 impl VersionOpt {
     pub fn do_versioning(&self, metadata: &Metadata) -> Result<Map<String, Version>> {
         let config: WorkspaceConfig = read_config(&metadata.workspace_metadata)?;
-        let branch = self.git.validate(&metadata.workspace_root, &config)?;
+        let mut git_roots = vec![git_repository_root(&metadata.workspace_root)?];
+
+        for pkg in &metadata.packages {
+            if !metadata.workspace_members.contains(&pkg.id) {
+                continue;
+            }
+
+            let manifest_dir = pkg
+                .manifest_path
+                .parent()
+                .ok_or_else(|| Error::ManifestHasNoParent(pkg.manifest_path.to_string()))?;
+            let repo_root = git_repository_root(&manifest_dir.to_path_buf())?;
+
+            if !git_roots.contains(&repo_root) {
+                git_roots.push(repo_root);
+            }
+        }
+
+        let branches = self.git.validate(&git_roots, &config)?;
         let mut since = self.change.since.clone();
 
         if self.change.since.is_none() {
@@ -181,13 +199,8 @@ impl VersionOpt {
             return Err(Error::Update);
         }
 
-        self.git.commit(
-            &metadata.workspace_root,
-            &new_version,
-            &new_versions,
-            branch,
-            &config,
-        )?;
+        self.git
+            .commit(&git_roots, &new_version, &new_versions, &branches, &config)?;
 
         Ok(new_versions)
     }

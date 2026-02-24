@@ -19,7 +19,7 @@ pub use dag::dag;
 pub use dev_dep_remover::{should_remove_dev_deps, DevDependencyRemover};
 pub(crate) use error::{debug, info, warn};
 pub use error::{get_debug, set_debug, Error};
-pub use git::{git, GitOpt};
+pub use git::{git, git_repository_root, GitOpt};
 pub use list::{list, ListOpt, ListPublicOpt};
 pub use pkg::{get_pkgs, is_private, Pkg};
 pub use publish::{
