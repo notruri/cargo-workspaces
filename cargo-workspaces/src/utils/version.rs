@@ -199,8 +199,31 @@ impl VersionOpt {
             return Err(Error::Update);
         }
 
-        self.git
-            .commit(&git_roots, &new_version, &new_versions, &branches, &config)?;
+        let mut new_versions_per_repo: Map<_, Map<_, _>> = Map::new();
+
+        for (pkg_name, pkg_version) in &new_versions {
+            if let Some(pkg) = metadata.packages.iter().find(|p| p.name == *pkg_name) {
+                let manifest_dir = pkg
+                    .manifest_path
+                    .parent()
+                    .ok_or_else(|| Error::ManifestHasNoParent(pkg.manifest_path.to_string()))?;
+                let repo_root = git_repository_root(&manifest_dir.to_path_buf())?;
+
+                new_versions_per_repo
+                    .entry(repo_root)
+                    .or_insert_with(Map::new)
+                    .insert(pkg_name.clone(), pkg_version.clone());
+            }
+        }
+
+        self.git.commit(
+            &git_roots,
+            &metadata.workspace_root,
+            &new_version,
+            &new_versions_per_repo,
+            &branches,
+            &config,
+        )?;
 
         Ok(new_versions)
     }

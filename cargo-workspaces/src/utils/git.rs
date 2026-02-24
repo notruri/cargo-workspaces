@@ -209,8 +209,9 @@ impl GitOpt {
     pub fn commit(
         &self,
         roots: &[Utf8PathBuf],
+        workspace_root: &Utf8PathBuf,
         new_version: &Option<Version>,
-        new_versions: &Map<String, Version>,
+        new_versions: &Map<Utf8PathBuf, Map<String, Version>>,
         branches: &Map<Utf8PathBuf, String>,
         config: &WorkspaceConfig,
     ) -> Result<(), Error> {
@@ -224,6 +225,19 @@ impl GitOpt {
                 if !added.0.success() {
                     return Err(Error::NotAdded(added.1, added.2));
                 }
+
+                let (staged_status, staged_out, _) =
+                    git(root, &["diff", "--cached", "--name-only"])?;
+
+                if !staged_status.success() {
+                    return Err(Error::Bail);
+                }
+
+                if staged_out.is_empty() {
+                    continue;
+                }
+
+                let repo_versions = new_versions.get(root).cloned().unwrap_or_default();
 
                 let mut args = vec!["commit".to_string()];
 
@@ -239,14 +253,21 @@ impl GitOpt {
                         msg = supplied;
                     }
 
-                    let mut msg = self.commit_msg(msg, new_versions);
+                    let mut msg = self.commit_msg(msg, &repo_versions);
 
-                    msg = msg.replace(
-                        "%v",
-                        &new_version
-                            .as_ref()
-                            .map_or("independent packages".to_string(), |x| format!("{}", x)),
-                    );
+                    let version_label = if let Some(version) = new_version {
+                        version.to_string()
+                    } else if repo_versions.len() == 1 {
+                        repo_versions
+                            .iter()
+                            .next()
+                            .map(|(name, version)| format!("{}@{}", name, version))
+                            .unwrap_or_else(|| "independent packages".to_string())
+                    } else {
+                        "independent packages".to_string()
+                    };
+
+                    msg = msg.replace("%v", &version_label);
 
                     args.push(msg);
                 }
@@ -260,7 +281,7 @@ impl GitOpt {
                 if !self.no_git_tag {
                     info!("version", format!("tagging in {}", root));
 
-                    if !self.no_global_tag {
+                    if !self.no_global_tag && root == workspace_root {
                         if let Some(version) = new_version {
                             let tag = format!("{}{}", &self.tag_prefix, version);
                             self.tag(root, &tag, &tag)?;
@@ -268,7 +289,7 @@ impl GitOpt {
                     }
 
                     if !(self.no_individual_tags || config.no_individual_tags.unwrap_or_default()) {
-                        for (p, v) in new_versions {
+                        for (p, v) in &repo_versions {
                             let tag =
                                 format!("{}{}", self.individual_tag_prefix.replace("%n", p), v);
                             self.tag(root, &tag, &tag)?;
