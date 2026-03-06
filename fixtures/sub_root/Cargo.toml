@@ -1,0 +1,15 @@
+[package]
+name = "sub-root"
+version = "0.1.0"
+authors = ["Pavan Kumar Sunkara <pavan.sss1991@gmail.com>"]
+edition = "2018"
+
+[[bin]]
+name = "sub-root"
+path = "src/main.rs"
+
+[workspace]
+members = [
+	"member",
+	"nested",
+]
