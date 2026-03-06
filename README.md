@@ -199,8 +199,8 @@ it's version be independent of the other crates, you can add the following to th
 independent = true
 ```
 
-When an independent crate is in a different git repository than the workspace root, such as a submodule,
-its individual git tag uses the global tag prefix (for example `v1.2.3` by default) instead of the
+When a crate is in a different git repository than the workspace root, such as a submodule, its
+individual git tag uses the global tag prefix (for example `v1.2.3` by default) instead of the
 package-prefixed individual tag format.
 
 For more details, check [Config](#config) section below.

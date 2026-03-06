@@ -19,9 +19,11 @@ fn test_sub_root_tags() {
 
     let root_tags = git_tags(dir.path());
     let nested_tags = git_tags(&dir.path().join("nested"));
+    let nested_subject = git_head_subject(&dir.path().join("nested"));
 
     assert_eq!(root_tags, vec!["sub-root-member@0.1.1", "v0.1.1"]);
     assert_eq!(nested_tags, vec!["v0.1.1"]);
+    assert_eq!(nested_subject, "Release v0.1.1");
 }
 
 #[test]
@@ -33,9 +35,27 @@ fn test_sub_virtual_tags() {
 
     let root_tags = git_tags(dir.path());
     let nested_tags = git_tags(&dir.path().join("nested"));
+    let nested_subject = git_head_subject(&dir.path().join("nested"));
 
     assert_eq!(root_tags, vec!["sub-virtual-member@0.1.1", "v0.1.1"]);
     assert_eq!(nested_tags, vec!["v0.1.1"]);
+    assert_eq!(nested_subject, "Release v0.1.1");
+}
+
+#[test]
+#[serial]
+fn test_non_independent_separate_repo_uses_repo_tag_label() {
+    let dir = setup_fixture("../fixtures/sub_virtual_nonind", &["nested"]);
+
+    run_version(dir.path());
+
+    let root_tags = git_tags(dir.path());
+    let nested_tags = git_tags(&dir.path().join("nested"));
+    let nested_subject = git_head_subject(&dir.path().join("nested"));
+
+    assert_eq!(root_tags, vec!["sub-virtual-nonind-member@0.1.1", "v0.1.1"]);
+    assert_eq!(nested_tags, vec!["v0.1.1"]);
+    assert_eq!(nested_subject, "Release v0.1.1");
 }
 
 #[test]
@@ -110,6 +130,10 @@ fn git_tags(dir: &Path) -> Vec<String> {
         .filter(|line| !line.is_empty())
         .map(|line| line.to_string())
         .collect()
+}
+
+fn git_head_subject(dir: &Path) -> String {
+    git(dir, &["log", "-1", "--pretty=%s"])
 }
 
 fn init_repo(dir: &Path) {
