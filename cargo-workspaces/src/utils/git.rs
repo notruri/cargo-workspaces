@@ -16,6 +16,7 @@ use std::{
 pub struct RepoVersion {
     pub version: Version,
     pub independent: bool,
+    pub root: bool,
 }
 
 pub fn git(root: &Utf8PathBuf, args: &[&str]) -> Result<(ExitStatus, String, String), Error> {
@@ -290,8 +291,10 @@ impl GitOpt {
 
                 if !self.no_git_tag {
                     info!("version", format!("tagging in {}", root));
+                    let has_global_tag =
+                        !self.no_global_tag && root == workspace_root && new_version.is_some();
 
-                    if !self.no_global_tag && root == workspace_root {
+                    if has_global_tag {
                         if let Some(version) = new_version {
                             let tag = format!("{}{}", &self.tag_prefix, version);
                             self.tag(root, &tag, &tag)?;
@@ -300,6 +303,11 @@ impl GitOpt {
 
                     if !(self.no_individual_tags || config.no_individual_tags.unwrap_or_default()) {
                         for (p, data) in &repo_versions {
+                            if self.should_skip_individual_tag(workspace_root, root, data, has_global_tag)
+                            {
+                                continue;
+                            }
+
                             let tag =
                                 self.individual_tag(workspace_root, root, p, &data.version, data.independent);
                             self.tag(root, &tag, &tag)?;
@@ -360,11 +368,21 @@ impl GitOpt {
 
         format!("{}{}", prefix, version)
     }
+
+    fn should_skip_individual_tag(
+        &self,
+        workspace_root: &Utf8PathBuf,
+        root: &Utf8PathBuf,
+        version: &RepoVersion,
+        has_global_tag: bool,
+    ) -> bool {
+        has_global_tag && root == workspace_root && version.root
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::GitOpt;
+    use super::{GitOpt, RepoVersion};
 
     use camino::Utf8PathBuf;
     use semver::Version;
@@ -395,6 +413,63 @@ mod tests {
         let tag = git.individual_tag(&workspace_root, &root, "crate", &version, true);
 
         assert_eq!(tag, "v1.2.3");
+    }
+
+    #[test]
+    fn root_package_tag_is_skipped_when_global_tag_exists() {
+        let git = git_opt();
+        let workspace_root = Utf8PathBuf::from("/workspace");
+
+        let skipped = git.should_skip_individual_tag(
+            &workspace_root,
+            &workspace_root,
+            &RepoVersion {
+                version: Version::parse("1.2.3").expect("valid version"),
+                independent: false,
+                root: true,
+            },
+            true,
+        );
+
+        assert!(skipped);
+    }
+
+    #[test]
+    fn non_root_package_tag_is_not_skipped_when_global_tag_exists() {
+        let git = git_opt();
+        let workspace_root = Utf8PathBuf::from("/workspace");
+
+        let skipped = git.should_skip_individual_tag(
+            &workspace_root,
+            &workspace_root,
+            &RepoVersion {
+                version: Version::parse("1.2.3").expect("valid version"),
+                independent: false,
+                root: false,
+            },
+            true,
+        );
+
+        assert!(!skipped);
+    }
+
+    #[test]
+    fn root_package_tag_is_not_skipped_without_global_tag() {
+        let git = git_opt();
+        let workspace_root = Utf8PathBuf::from("/workspace");
+
+        let skipped = git.should_skip_individual_tag(
+            &workspace_root,
+            &workspace_root,
+            &RepoVersion {
+                version: Version::parse("1.2.3").expect("valid version"),
+                independent: false,
+                root: true,
+            },
+            false,
+        );
+
+        assert!(!skipped);
     }
 
     #[test]

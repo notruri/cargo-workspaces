@@ -218,6 +218,7 @@ impl VersionOpt {
                         RepoVersion {
                             version: pkg_version.clone(),
                             independent: config.independent.unwrap_or(false),
+                            root: manifest_dir == metadata.workspace_root,
                         },
                     );
             }
