@@ -18,11 +18,13 @@ fn test_sub_root_tags() {
     run_version(dir.path());
 
     let root_tags = git_tags(dir.path());
+    let root_message = git_head_message(dir.path());
     let nested_tags = git_tags(&dir.path().join("nested"));
     let nested_subject = git_head_subject(&dir.path().join("nested"));
 
     assert_eq!(root_tags, vec!["sub-root-member@0.1.1", "v0.1.1"]);
     assert_eq!(nested_tags, vec!["v0.1.1"]);
+    assert!(root_message.contains("External Packages:\nsub-root-nested@0.1.1"));
     assert_eq!(nested_subject, "Release v0.1.1");
 }
 
@@ -34,11 +36,13 @@ fn test_sub_virtual_tags() {
     run_version(dir.path());
 
     let root_tags = git_tags(dir.path());
+    let root_message = git_head_message(dir.path());
     let nested_tags = git_tags(&dir.path().join("nested"));
     let nested_subject = git_head_subject(&dir.path().join("nested"));
 
     assert_eq!(root_tags, vec!["sub-virtual-member@0.1.1", "v0.1.1"]);
     assert_eq!(nested_tags, vec!["v0.1.1"]);
+    assert!(root_message.contains("External Packages:\nsub-virtual-nested@0.1.1"));
     assert_eq!(nested_subject, "Release v0.1.1");
 }
 
@@ -80,6 +84,33 @@ fn test_workspace_dependencies_are_updated_for_forced_independent_bump() {
             .contains(r#"sub-virtual-wsdeps-nested = { workspace = true }"#)
     );
     assert!(root_message.contains("External Packages:\nsub-virtual-wsdeps-nested@0.1.1"));
+}
+
+#[test]
+#[serial]
+fn test_root_commit_is_not_created_when_root_has_no_changes() {
+    let dir = setup_fixture("../fixtures/sub_only", &["nested"]);
+
+    run_version(dir.path());
+
+    assert_eq!(git_commit_count(dir.path()), 1);
+    assert_eq!(git_tags(dir.path()), Vec::<String>::new());
+    assert_eq!(git_head_subject(&dir.path().join("nested")), "Release v0.1.1");
+}
+
+#[test]
+#[serial]
+fn test_root_tracking_commit_is_optional_for_external_only_releases() {
+    let dir = setup_fixture("../fixtures/sub_only", &["nested"]);
+
+    run_version_with_args(dir.path(), &["--root-tracking-commit"]);
+
+    let root_message = git_head_message(dir.path());
+
+    assert_eq!(git_commit_count(dir.path()), 2);
+    assert_eq!(git_head_subject(dir.path()), "Track external releases");
+    assert!(root_message.contains("External Packages:\nsub-only-nested@0.1.1"));
+    assert_eq!(git_tags(dir.path()), Vec::<String>::new());
 }
 
 #[test]
@@ -153,6 +184,12 @@ fn git_head_subject(dir: &Path) -> String {
 
 fn git_head_message(dir: &Path) -> String {
     git(dir, &["log", "-1", "--pretty=%B"])
+}
+
+fn git_commit_count(dir: &Path) -> usize {
+    git(dir, &["rev-list", "--count", "HEAD"])
+        .parse()
+        .expect("git commit count")
 }
 
 fn init_repo(dir: &Path) {

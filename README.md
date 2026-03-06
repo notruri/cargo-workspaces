@@ -186,6 +186,8 @@ GIT OPTIONS:
         --no-git-tag                        Do not tag generated commit
         --no-global-tag                     Do not create a global tag for a workspace
         --no-individual-tags                Do not tag individual versions for crates
+        --root-tracking-commit              Create a synthetic root commit to track external multi-repo releases
+        --root-tracking-message <MESSAGE>   Use a custom commit message for the synthetic root tracking commit [default: Track external releases]
         --tag-prefix <PREFIX>               Customize tag prefix (can be empty) [default: v]
 ```
 
@@ -250,6 +252,8 @@ GIT OPTIONS:
         --no-git-tag                        Do not tag generated commit
         --no-global-tag                     Do not create a global tag for a workspace
         --no-individual-tags                Do not tag individual versions for crates
+        --root-tracking-commit              Create a synthetic root commit to track external multi-repo releases
+        --root-tracking-message <MESSAGE>   Use a custom commit message for the synthetic root tracking commit [default: Track external releases]
         --tag-prefix <PREFIX>               Customize tag prefix (can be empty) [default: v]
 
 PUBLISH OPTIONS:

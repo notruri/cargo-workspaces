@@ -224,6 +224,13 @@ impl VersionOpt {
                             root: manifest_dir == metadata.workspace_root,
                         },
                     );
+
+                if repo_root != &metadata.workspace_root {
+                    external_versions_per_repo
+                        .entry(metadata.workspace_root.clone())
+                        .or_insert_with(Map::new)
+                        .insert(pkg_name.clone(), pkg_version.clone());
+                }
             }
         }
 

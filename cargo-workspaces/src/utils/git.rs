@@ -54,7 +54,8 @@ pub struct GitOpt {
     #[clap(long, conflicts_with_all = &[
         "allow-branch", "amend", "message", "no-git-tag",
         "tag-prefix", "individual-tag-prefix", "no-individual-tags",
-        "no-git-push", "git-remote", "no-global-tag"
+        "no-git-push", "git-remote", "no-global-tag",
+        "root-tracking-commit", "root-tracking-message"
     ])]
     pub no_git_commit: bool,
 
@@ -74,6 +75,14 @@ pub struct GitOpt {
         forbid_empty_values(true)
     )]
     pub message: Option<String>,
+
+    /// Create a synthetic root commit to track external multi-repo releases
+    #[clap(long, conflicts_with_all = &["amend"])]
+    pub root_tracking_commit: bool,
+
+    /// Use a custom commit message for the synthetic root tracking commit [default: Track external releases]
+    #[clap(long, requires = "root-tracking-commit", forbid_empty_values(true))]
+    pub root_tracking_message: Option<String>,
 
     /// Do not tag generated commit
     #[clap(long, conflicts_with_all = &["tag-prefix", "individual-tag-prefix", "no-individual-tags"])]
@@ -241,6 +250,42 @@ impl GitOpt {
                 }
 
                 if staged_out.is_empty() {
+                    let repo_external_versions =
+                        external_versions.get(root).cloned().unwrap_or_default();
+                    let is_tracking_commit = self.root_tracking_commit
+                        && root == workspace_root
+                        && !repo_external_versions.is_empty();
+
+                    if !is_tracking_commit {
+                        continue;
+                    }
+
+                    let mut args = vec!["commit".to_string(), "--allow-empty".to_string()];
+                    args.push("-m".to_string());
+
+                    let tracking_msg = self
+                        .root_tracking_message
+                        .as_deref()
+                        .unwrap_or("Track external releases");
+                    let msg = self.commit_msg(tracking_msg, &Map::new(), &repo_external_versions);
+                    args.push(msg);
+
+                    let committed = git(root, &args.iter().map(|x| x.as_str()).collect::<Vec<_>>())?;
+
+                    if !committed.0.success() {
+                        return Err(Error::NotCommitted(committed.1, committed.2));
+                    }
+
+                    if !self.no_git_push {
+                        info!("git", format!("pushing from {}", root));
+
+                        let pushed = git(root, &["push", &self.git_remote, branch])?;
+
+                        if !pushed.0.success() {
+                            return Err(Error::NotPushed(pushed.1, pushed.2));
+                        }
+                    }
+
                     continue;
                 }
 
@@ -384,14 +429,14 @@ impl GitOpt {
                 })
                 .unwrap_or_else(|| "independent packages".to_string())
         } else if let Some(version) = new_version {
-            version.to_string()
+            self.global_tag(version)
         } else if repo_versions.len() == 1 {
             repo_versions
                 .iter()
                 .next()
                 .map(|(pkg_name, data)| {
                     if root == workspace_root && data.root {
-                        data.version.to_string()
+                        self.global_tag(&data.version)
                     } else {
                         self.individual_tag(workspace_root, root, pkg_name, &data.version)
                     }
@@ -418,6 +463,10 @@ impl GitOpt {
         format!("{}{}", prefix, version)
     }
 
+    fn global_tag(&self, version: &Version) -> String {
+        format!("{}{}", self.tag_prefix, version)
+    }
+
     fn should_skip_individual_tag(
         &self,
         workspace_root: &Utf8PathBuf,
@@ -442,6 +491,8 @@ mod tests {
             allow_branch: None,
             amend: false,
             message: None,
+            root_tracking_commit: false,
+            root_tracking_message: None,
             no_git_tag: false,
             no_individual_tags: false,
             no_global_tag: false,
@@ -576,7 +627,7 @@ mod tests {
     }
 
     #[test]
-    fn commit_version_label_uses_plain_version_for_root_package_in_workspace_repo() {
+    fn commit_version_label_uses_global_prefix_for_root_package_in_workspace_repo() {
         let git = git_opt();
         let workspace_root = Utf8PathBuf::from("/workspace");
         let mut repo_versions = Map::new();
@@ -592,7 +643,7 @@ mod tests {
         let label =
             git.commit_version_label(&workspace_root, &workspace_root, &None, &repo_versions);
 
-        assert_eq!(label, "1.2.3");
+        assert_eq!(label, "v1.2.3");
     }
 
     #[test]
@@ -616,7 +667,7 @@ mod tests {
     }
 
     #[test]
-    fn commit_version_label_uses_workspace_version_for_shared_workspace_commit() {
+    fn commit_version_label_uses_global_prefix_for_shared_workspace_commit() {
         let git = git_opt();
         let workspace_root = Utf8PathBuf::from("/workspace");
         let new_version = Some(Version::parse("1.2.3").expect("valid version"));
@@ -624,7 +675,7 @@ mod tests {
         let label =
             git.commit_version_label(&workspace_root, &workspace_root, &new_version, &Map::new());
 
-        assert_eq!(label, "1.2.3");
+        assert_eq!(label, "v1.2.3");
     }
 
     #[test]
