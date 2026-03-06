@@ -5,7 +5,7 @@ use serial_test::serial;
 use tempfile::TempDir;
 
 use std::{
-    fs::{copy, create_dir_all, read_dir},
+    fs::{copy, create_dir_all, read_dir, read_to_string},
     path::Path,
     process::Command as StdCommand,
 };
@@ -38,6 +38,28 @@ fn test_sub_virtual_tags() {
     assert_eq!(nested_tags, vec!["v0.1.1"]);
 }
 
+#[test]
+#[serial]
+fn test_workspace_dependencies_are_updated_for_forced_independent_bump() {
+    let dir = setup_fixture("../fixtures/sub_virtual_wsdeps", &["nested"]);
+
+    run_version_with_args(
+        dir.path(),
+        &["--force", "sub-virtual-wsdeps-nested"],
+    );
+
+    assert!(
+        read_to_string(dir.path().join("Cargo.toml"))
+            .expect("read workspace manifest")
+            .contains(r#"sub-virtual-wsdeps-nested = { version = "0.1.1", path = "nested" }"#)
+    );
+    assert!(
+        read_to_string(dir.path().join("member/Cargo.toml"))
+            .expect("read member manifest")
+            .contains(r#"sub-virtual-wsdeps-nested = { workspace = true }"#)
+    );
+}
+
 fn setup_fixture(src: &str, nested_roots: &[&str]) -> TempDir {
     let dir = TempDir::new().expect("create temp dir");
     copy_dir(Path::new(src), dir.path());
@@ -51,17 +73,24 @@ fn setup_fixture(src: &str, nested_roots: &[&str]) -> TempDir {
 }
 
 fn run_version(dir: &Path) {
+    run_version_with_args(dir, &[]);
+}
+
+fn run_version_with_args(dir: &Path, extra_args: &[&str]) {
+    let mut args = vec![
+        "ws",
+        "version",
+        "patch",
+        "-y",
+        "--no-git-push",
+        "--allow-branch",
+        "*",
+    ];
+    args.extend_from_slice(extra_args);
+
     let output = Command::new(assert_cmd::cargo::cargo_bin!("cargo-ws"))
         .current_dir(dir)
-        .args([
-            "ws",
-            "version",
-            "patch",
-            "-y",
-            "--no-git-push",
-            "--allow-branch",
-            "*",
-        ])
+        .args(&args)
         .output()
         .expect("run cargo-ws version");
 

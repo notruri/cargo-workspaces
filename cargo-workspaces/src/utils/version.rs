@@ -173,24 +173,26 @@ impl VersionOpt {
             )?;
         }
 
+        let workspace_root = metadata.workspace_root.join("Cargo.toml");
+        let mut workspace_versions = new_versions.clone();
+
         if let Some(new_version) = &new_version {
-            let workspace_root = metadata.workspace_root.join("Cargo.toml");
-            let mut new_versions = new_versions.clone();
+            workspace_versions.insert("".to_string(), new_version.clone());
+        }
 
-            new_versions.insert("".to_string(), new_version.clone());
+        let workspace_manifest = fs::read_to_string(&workspace_root)?;
+        let updated_workspace_manifest = format!(
+            "{}\n",
+            change_versions(
+                workspace_manifest.clone(),
+                "",
+                &workspace_versions,
+                self.exact
+            )?
+        );
 
-            fs::write(
-                &workspace_root,
-                format!(
-                    "{}\n",
-                    change_versions(
-                        fs::read_to_string(&workspace_root)?,
-                        "",
-                        &new_versions,
-                        self.exact
-                    )?
-                ),
-            )?;
+        if workspace_manifest != updated_workspace_manifest {
+            fs::write(&workspace_root, updated_workspace_manifest)?;
         }
 
         let output = cargo(&metadata.workspace_root, &["update", "-w"], &[])?;

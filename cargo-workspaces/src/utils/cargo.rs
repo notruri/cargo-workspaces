@@ -187,9 +187,15 @@ pub fn cargo_config_get(root: &Utf8Path, name: &str) -> Result<String> {
 enum Context {
     Beginning,
     Package,
-    Dependencies,
-    DependencyEntry(String),
+    Dependencies(bool),
+    DependencyEntry(String, bool),
     DontCare,
+}
+
+fn is_workspace_context(caps: &Captures) -> bool {
+    caps.get(1)
+        .map(|prefix| prefix.as_str().starts_with("workspace."))
+        .unwrap_or(false)
 }
 
 fn edit_version(
@@ -197,12 +203,13 @@ fn edit_version(
     new_lines: &mut Vec<String>,
     versions: &Map<String, Version>,
     exact: bool,
+    force: bool,
     version_index: usize,
 ) -> Result {
     if let Some(new_version) = versions.get(&caps[version_index]) {
         if exact {
             new_lines.push(format!("{}={}{}", &caps[1], new_version, &caps[4]));
-        } else if !VersionReq::parse(&caps[3])?.matches(new_version) {
+        } else if force || !VersionReq::parse(&caps[3])?.matches(new_version) {
             new_lines.push(format!("{}{}{}", &caps[1], new_version, &caps[4]));
         }
     }
@@ -233,9 +240,9 @@ fn parse<P, D, DE, DP>(
 ) -> Result<String>
 where
     P: Fn(&str, &mut Vec<String>) -> Result,
-    D: Fn(&str, &mut Vec<String>) -> Result,
-    DE: Fn(&str, &str, &mut Vec<String>) -> Result<Option<Context>>,
-    DP: Fn(&str, &mut Vec<String>) -> Result,
+    D: Fn(bool, &str, &mut Vec<String>) -> Result,
+    DE: Fn(&str, bool, &str, &mut Vec<String>) -> Result<Option<Context>>,
+    DP: Fn(&str, bool, &mut Vec<String>) -> Result,
 {
     let mut context = Context::Beginning;
     let mut new_lines = vec![];
@@ -247,24 +254,26 @@ where
         #[allow(clippy::if_same_then_else)]
         if trimmed.starts_with("[package]") || trimmed.starts_with("[workspace.package]") {
             context = Context::Package;
-        } else if DEP_TABLE.captures(trimmed).is_some() {
-            context = Context::Dependencies;
-        } else if BUILD_DEP_TABLE.captures(trimmed).is_some() {
-            context = Context::Dependencies;
-        } else if DEV_DEP_TABLE.captures(trimmed).is_some() && dev_deps {
-            context = Context::Dependencies;
+        } else if let Some(caps) = DEP_TABLE.captures(trimmed) {
+            context = Context::Dependencies(is_workspace_context(&caps));
+        } else if let Some(caps) = BUILD_DEP_TABLE.captures(trimmed) {
+            context = Context::Dependencies(is_workspace_context(&caps));
+        } else if let Some(caps) = DEV_DEP_TABLE.captures(trimmed) {
+            if dev_deps {
+                context = Context::Dependencies(is_workspace_context(&caps));
+            }
         } else if let Some(caps) = DEP_ENTRY.captures(trimmed) {
-            context = Context::DependencyEntry(caps[3].to_string());
+            context = Context::DependencyEntry(caps[3].to_string(), is_workspace_context(&caps));
         } else if let Some(caps) = BUILD_DEP_ENTRY.captures(trimmed) {
-            context = Context::DependencyEntry(caps[3].to_string());
+            context = Context::DependencyEntry(caps[3].to_string(), is_workspace_context(&caps));
         } else if let Some(caps) = DEV_DEP_ENTRY.captures(trimmed) {
             // TODO: let-chain
             if dev_deps {
-                context = Context::DependencyEntry(caps[3].to_string());
+                context = Context::DependencyEntry(caps[3].to_string(), is_workspace_context(&caps));
             }
         } else if trimmed.starts_with('[') {
-            if let Context::DependencyEntry(ref dep) = context {
-                dependency_pkg_f(dep, &mut new_lines)?;
+            if let Context::DependencyEntry(ref dep, workspace) = context {
+                dependency_pkg_f(dep, workspace, &mut new_lines)?;
             }
 
             context = Context::DontCare;
@@ -272,9 +281,11 @@ where
             // TODO: Support `package.version` like stuff (with quotes) at beginning
             match context {
                 Context::Package => package_f(line, &mut new_lines)?,
-                Context::Dependencies => dependencies_f(line, &mut new_lines)?,
-                Context::DependencyEntry(ref dep) => {
-                    if let Some(new_context) = dependency_entries_f(dep, line, &mut new_lines)? {
+                Context::Dependencies(workspace) => dependencies_f(workspace, line, &mut new_lines)?,
+                Context::DependencyEntry(ref dep, workspace) => {
+                    if let Some(new_context) =
+                        dependency_entries_f(dep, workspace, line, &mut new_lines)?
+                    {
                         context = new_context;
                     }
                 }
@@ -287,8 +298,8 @@ where
         }
     }
 
-    if let Context::DependencyEntry(ref dep) = context {
-        dependency_pkg_f(dep, &mut new_lines)?;
+    if let Context::DependencyEntry(ref dep, workspace) = context {
+        dependency_pkg_f(dep, workspace, &mut new_lines)?;
     }
 
     Ok(new_lines.join(if manifest.contains(CRLF) { CRLF } else { LF }))
@@ -311,7 +322,7 @@ pub fn rename_packages(
 
             Ok(())
         },
-        |line, new_lines| {
+        |_, line, new_lines| {
             if let Some(caps) = DEP_DIRECT_NAME.captures(line) {
                 if let Some(new_name) = renames.get(&caps[2]) {
                     new_lines.push(format!(
@@ -334,7 +345,7 @@ pub fn rename_packages(
 
             Ok(())
         },
-        |_, line, new_lines| {
+        |_, _, line, new_lines| {
             if let Some(caps) = PACKAGE.captures(line) {
                 rename_dep(caps, new_lines, renames, 2)?;
                 Ok(Some(Context::DontCare))
@@ -342,7 +353,7 @@ pub fn rename_packages(
                 Ok(None)
             }
         },
-        |dep, new_lines| {
+        |dep, _, new_lines| {
             if let Some(new_name) = renames.get(dep) {
                 new_lines.push(format!("package = \"{}\"", new_name));
             }
@@ -370,27 +381,30 @@ pub fn change_versions(
 
             Ok(())
         },
-        |line, new_lines| {
+        |workspace, line, new_lines| {
             if let Some(caps) = DEP_DIRECT_VERSION.captures(line) {
-                edit_version(caps, new_lines, versions, exact, 2)?;
+                edit_version(caps, new_lines, versions, exact, workspace, 2)?;
             } else if let Some(caps) = DEP_OBJ_RENAME_VERSION.captures(line) {
-                edit_version(caps, new_lines, versions, exact, 5)?;
+                edit_version(caps, new_lines, versions, exact, workspace, 5)?;
             } else if let Some(caps) = DEP_OBJ_RENAME_BEFORE_VERSION.captures(line) {
-                edit_version(caps, new_lines, versions, exact, 2)?;
+                edit_version(caps, new_lines, versions, exact, workspace, 2)?;
             } else if let Some(caps) = DEP_OBJ_VERSION.captures(line) {
-                edit_version(caps, new_lines, versions, exact, 2)?;
+                edit_version(caps, new_lines, versions, exact, workspace, 2)?;
             }
 
             Ok(())
         },
-        |dep, line, new_lines| {
+        |dep, workspace, line, new_lines| {
             if let Some(caps) = PACKAGE.captures(line) {
-                return Ok(Some(Context::DependencyEntry(caps[2].to_string())));
+                return Ok(Some(Context::DependencyEntry(
+                    caps[2].to_string(),
+                    workspace,
+                )));
             } else if let Some(caps) = VERSION.captures(line) {
                 if let Some(new_version) = versions.get(dep) {
                     if exact {
                         new_lines.push(format!("{}={}{}", &caps[1], new_version, &caps[3]));
-                    } else if !VersionReq::parse(&caps[2])?.matches(new_version) {
+                    } else if workspace || !VersionReq::parse(&caps[2])?.matches(new_version) {
                         new_lines.push(format!("{}{}{}", &caps[1], new_version, &caps[3]));
                     }
                 }
@@ -398,7 +412,7 @@ pub fn change_versions(
 
             Ok(None)
         },
-        |_, _| Ok(()),
+        |_, _, _| Ok(()),
     )
 }
 
@@ -688,17 +702,57 @@ mod test {
     fn test_version_workspace_dependencies() {
         let m = indoc! {r#"
             [workspace.dependencies]
-            this = "0.0.1" # hello
+            this = "0.1.0" # hello
         "#};
 
         let mut v = Map::new();
-        v.insert("this".to_string(), Version::parse("0.3.0").unwrap());
+        v.insert("this".to_string(), Version::parse("0.1.1").unwrap());
 
         assert_eq!(
             change_versions(m.into(), "another", &v, false).unwrap(),
             indoc! {r#"
                 [workspace.dependencies]
-                this = "0.3.0" # hello"#
+                this = "0.1.1" # hello"#
+            }
+        );
+    }
+
+    #[test]
+    fn test_version_workspace_dependencies_object() {
+        let m = indoc! {r#"
+            [workspace.dependencies]
+            this = { version = "0.1.0", path = "../this" } # hello
+        "#};
+
+        let mut v = Map::new();
+        v.insert("this".to_string(), Version::parse("0.1.1").unwrap());
+
+        assert_eq!(
+            change_versions(m.into(), "another", &v, false).unwrap(),
+            indoc! {r#"
+                [workspace.dependencies]
+                this = { version = "0.1.1", path = "../this" } # hello"#
+            }
+        );
+    }
+
+    #[test]
+    fn test_version_workspace_dependency_table() {
+        let m = indoc! {r#"
+            [workspace.dependencies.this]
+            path = "../this"
+            version = "0.1.0" # hello
+        "#};
+
+        let mut v = Map::new();
+        v.insert("this".to_string(), Version::parse("0.1.1").unwrap());
+
+        assert_eq!(
+            change_versions(m.into(), "another", &v, false).unwrap(),
+            indoc! {r#"
+                [workspace.dependencies.this]
+                path = "../this"
+                version = "0.1.1" # hello"#
             }
         );
     }
@@ -755,6 +809,25 @@ mod test {
             change_versions(m.into(), "another", &v, true).unwrap(),
             indoc! {r#"
                 [dependencies]
+                this = { path = "../", version = "=0.3.0" } # hello"#
+            }
+        );
+    }
+
+    #[test]
+    fn test_exact_workspace_dependencies() {
+        let m = indoc! {r#"
+            [workspace.dependencies]
+            this = { path = "../", version = "0.0.1" } # hello
+        "#};
+
+        let mut v = Map::new();
+        v.insert("this".to_string(), Version::parse("0.3.0").unwrap());
+
+        assert_eq!(
+            change_versions(m.into(), "another", &v, true).unwrap(),
+            indoc! {r#"
+                [workspace.dependencies]
                 this = { path = "../", version = "=0.3.0" } # hello"#
             }
         );

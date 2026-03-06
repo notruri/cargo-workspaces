@@ -1,0 +1,8 @@
+[workspace]
+members = [
+	"member",
+	"nested",
+]
+
+[workspace.dependencies]
+sub-virtual-wsdeps-nested = { version = "0.1.0", path = "nested" }
