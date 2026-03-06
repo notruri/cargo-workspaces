@@ -12,6 +12,12 @@ use std::{
     process::{Command, ExitStatus},
 };
 
+#[derive(Debug, Clone)]
+pub struct RepoVersion {
+    pub version: Version,
+    pub independent: bool,
+}
+
 pub fn git(root: &Utf8PathBuf, args: &[&str]) -> Result<(ExitStatus, String, String), Error> {
     debug!("git", args.to_vec().join(" "));
 
@@ -211,7 +217,7 @@ impl GitOpt {
         roots: &[Utf8PathBuf],
         workspace_root: &Utf8PathBuf,
         new_version: &Option<Version>,
-        new_versions: &Map<Utf8PathBuf, Map<String, Version>>,
+        new_versions: &Map<Utf8PathBuf, Map<String, RepoVersion>>,
         branches: &Map<Utf8PathBuf, String>,
         config: &WorkspaceConfig,
     ) -> Result<(), Error> {
@@ -238,6 +244,10 @@ impl GitOpt {
                 }
 
                 let repo_versions = new_versions.get(root).cloned().unwrap_or_default();
+                let commit_versions = repo_versions
+                    .iter()
+                    .map(|(name, data)| (name.clone(), data.version.clone()))
+                    .collect();
 
                 let mut args = vec!["commit".to_string()];
 
@@ -253,12 +263,12 @@ impl GitOpt {
                         msg = supplied;
                     }
 
-                    let mut msg = self.commit_msg(msg, &repo_versions);
+                    let mut msg = self.commit_msg(msg, &commit_versions);
 
                     let version_label = if let Some(version) = new_version {
                         version.to_string()
-                    } else if repo_versions.len() == 1 {
-                        repo_versions
+                    } else if commit_versions.len() == 1 {
+                        commit_versions
                             .iter()
                             .next()
                             .map(|(name, version)| format!("{}@{}", name, version))
@@ -289,9 +299,9 @@ impl GitOpt {
                     }
 
                     if !(self.no_individual_tags || config.no_individual_tags.unwrap_or_default()) {
-                        for (p, v) in &repo_versions {
+                        for (p, data) in &repo_versions {
                             let tag =
-                                format!("{}{}", self.individual_tag_prefix.replace("%n", p), v);
+                                self.individual_tag(workspace_root, root, p, &data.version, data.independent);
                             self.tag(root, &tag, &tag)?;
                         }
                     }
@@ -332,5 +342,95 @@ impl GitOpt {
                 .collect::<Vec<_>>()
                 .join("\n")
         )
+    }
+
+    fn individual_tag(
+        &self,
+        workspace_root: &Utf8PathBuf,
+        root: &Utf8PathBuf,
+        pkg_name: &str,
+        version: &Version,
+        independent: bool,
+    ) -> String {
+        let prefix = if independent && root != workspace_root {
+            &self.tag_prefix
+        } else {
+            &self.individual_tag_prefix.replace("%n", pkg_name)
+        };
+
+        format!("{}{}", prefix, version)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GitOpt;
+
+    use camino::Utf8PathBuf;
+    use semver::Version;
+
+    fn git_opt() -> GitOpt {
+        GitOpt {
+            no_git_commit: false,
+            allow_branch: None,
+            amend: false,
+            message: None,
+            no_git_tag: false,
+            no_individual_tags: false,
+            no_global_tag: false,
+            tag_prefix: "v".to_string(),
+            individual_tag_prefix: "%n@".to_string(),
+            no_git_push: false,
+            git_remote: "origin".to_string(),
+        }
+    }
+
+    #[test]
+    fn individual_tag_uses_global_prefix_for_independent_package_in_separate_repo() {
+        let git = git_opt();
+        let workspace_root = Utf8PathBuf::from("/workspace");
+        let root = Utf8PathBuf::from("/workspace/submodule");
+        let version = Version::parse("1.2.3").expect("valid version");
+
+        let tag = git.individual_tag(&workspace_root, &root, "crate", &version, true);
+
+        assert_eq!(tag, "v1.2.3");
+    }
+
+    #[test]
+    fn individual_tag_uses_package_prefix_for_independent_package_in_workspace_repo() {
+        let git = git_opt();
+        let workspace_root = Utf8PathBuf::from("/workspace");
+        let version = Version::parse("1.2.3").expect("valid version");
+
+        let tag = git.individual_tag(&workspace_root, &workspace_root, "crate", &version, true);
+
+        assert_eq!(tag, "crate@1.2.3");
+    }
+
+    #[test]
+    fn individual_tag_uses_package_prefix_for_non_independent_package_in_separate_repo() {
+        let git = git_opt();
+        let workspace_root = Utf8PathBuf::from("/workspace");
+        let root = Utf8PathBuf::from("/workspace/submodule");
+        let version = Version::parse("1.2.3").expect("valid version");
+
+        let tag = git.individual_tag(&workspace_root, &root, "crate", &version, false);
+
+        assert_eq!(tag, "crate@1.2.3");
+    }
+
+    #[test]
+    fn individual_tag_uses_custom_global_prefix_for_independent_package_in_separate_repo() {
+        let mut git = git_opt();
+        let workspace_root = Utf8PathBuf::from("/workspace");
+        let root = Utf8PathBuf::from("/workspace/submodule");
+        let version = Version::parse("1.2.3").expect("valid version");
+
+        git.tag_prefix = "release-".to_string();
+
+        let tag = git.individual_tag(&workspace_root, &root, "crate", &version, true);
+
+        assert_eq!(tag, "release-1.2.3");
     }
 }

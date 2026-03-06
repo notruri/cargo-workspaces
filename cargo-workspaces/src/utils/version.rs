@@ -1,6 +1,6 @@
 use crate::utils::{
     cargo, change_versions, git_repository_root, info, read_config, ChangeData, ChangeOpt, Error,
-    GitOpt, Pkg, Result, WorkspaceConfig, INTERNAL_ERR,
+    GitOpt, PackageConfig, Pkg, RepoVersion, Result, WorkspaceConfig, INTERNAL_ERR,
 };
 
 use cargo_metadata::Metadata;
@@ -208,11 +208,18 @@ impl VersionOpt {
                     .parent()
                     .ok_or_else(|| Error::ManifestHasNoParent(pkg.manifest_path.to_string()))?;
                 let repo_root = git_repository_root(&manifest_dir.to_path_buf())?;
+                let config: PackageConfig = read_config(&pkg.metadata)?;
 
                 new_versions_per_repo
                     .entry(repo_root)
                     .or_insert_with(Map::new)
-                    .insert(pkg_name.clone(), pkg_version.clone());
+                    .insert(
+                        pkg_name.clone(),
+                        RepoVersion {
+                            version: pkg_version.clone(),
+                            independent: config.independent.unwrap_or(false),
+                        },
+                    );
             }
         }
 
