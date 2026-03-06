@@ -82,6 +82,7 @@ impl VersionOpt {
     pub fn do_versioning(&self, metadata: &Metadata) -> Result<Map<String, Version>> {
         let config: WorkspaceConfig = read_config(&metadata.workspace_metadata)?;
         let mut git_roots = vec![git_repository_root(&metadata.workspace_root)?];
+        let mut package_roots = Map::new();
 
         for pkg in &metadata.packages {
             if !metadata.workspace_members.contains(&pkg.id) {
@@ -93,6 +94,7 @@ impl VersionOpt {
                 .parent()
                 .ok_or_else(|| Error::ManifestHasNoParent(pkg.manifest_path.to_string()))?;
             let repo_root = git_repository_root(&manifest_dir.to_path_buf())?;
+            package_roots.insert(pkg.name.clone(), repo_root.clone());
 
             if !git_roots.contains(&repo_root) {
                 git_roots.push(repo_root);
@@ -202,6 +204,7 @@ impl VersionOpt {
         }
 
         let mut new_versions_per_repo: Map<_, Map<_, _>> = Map::new();
+        let mut external_versions_per_repo: Map<_, Map<_, _>> = Map::new();
 
         for (pkg_name, pkg_version) in &new_versions {
             if let Some(pkg) = metadata.packages.iter().find(|p| p.name == *pkg_name) {
@@ -209,9 +212,10 @@ impl VersionOpt {
                     .manifest_path
                     .parent()
                     .ok_or_else(|| Error::ManifestHasNoParent(pkg.manifest_path.to_string()))?;
-                let repo_root = git_repository_root(&manifest_dir.to_path_buf())?;
+                let repo_root = package_roots.get(pkg_name).expect(INTERNAL_ERR);
+
                 new_versions_per_repo
-                    .entry(repo_root)
+                    .entry(repo_root.clone())
                     .or_insert_with(Map::new)
                     .insert(
                         pkg_name.clone(),
@@ -223,11 +227,33 @@ impl VersionOpt {
             }
         }
 
+        for pkg in &metadata.packages {
+            if !metadata.workspace_members.contains(&pkg.id) {
+                continue;
+            }
+
+            let repo_root = package_roots.get(&pkg.name).expect(INTERNAL_ERR);
+
+            for dep in &pkg.dependencies {
+                if let Some(version) = new_versions.get(&dep.name) {
+                    if let Some(dep_root) = package_roots.get(&dep.name) {
+                        if dep_root != repo_root {
+                            external_versions_per_repo
+                                .entry(repo_root.clone())
+                                .or_insert_with(Map::new)
+                                .insert(dep.name.clone(), version.clone());
+                        }
+                    }
+                }
+            }
+        }
+
         self.git.commit(
             &git_roots,
             &metadata.workspace_root,
             &new_version,
             &new_versions_per_repo,
+            &external_versions_per_repo,
             &branches,
             &config,
         )?;

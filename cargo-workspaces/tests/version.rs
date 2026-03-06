@@ -67,6 +67,7 @@ fn test_workspace_dependencies_are_updated_for_forced_independent_bump() {
         dir.path(),
         &["--force", "sub-virtual-wsdeps-nested"],
     );
+    let root_message = git_head_message(dir.path());
 
     assert!(
         read_to_string(dir.path().join("Cargo.toml"))
@@ -78,6 +79,20 @@ fn test_workspace_dependencies_are_updated_for_forced_independent_bump() {
             .expect("read member manifest")
             .contains(r#"sub-virtual-wsdeps-nested = { workspace = true }"#)
     );
+    assert!(root_message.contains("External Packages:\nsub-virtual-wsdeps-nested@0.1.1"));
+}
+
+#[test]
+#[serial]
+fn test_root_commit_message_separates_local_and_external_packages() {
+    let dir = setup_fixture("../fixtures/sub_virtual_wsdeps", &["nested"]);
+
+    run_version(dir.path());
+
+    let root_message = git_head_message(dir.path());
+
+    assert!(root_message.contains("Local Packages:\nsub-virtual-wsdeps-member@0.1.1"));
+    assert!(root_message.contains("External Packages:\nsub-virtual-wsdeps-nested@0.1.1"));
 }
 
 fn setup_fixture(src: &str, nested_roots: &[&str]) -> TempDir {
@@ -134,6 +149,10 @@ fn git_tags(dir: &Path) -> Vec<String> {
 
 fn git_head_subject(dir: &Path) -> String {
     git(dir, &["log", "-1", "--pretty=%s"])
+}
+
+fn git_head_message(dir: &Path) -> String {
+    git(dir, &["log", "-1", "--pretty=%B"])
 }
 
 fn init_repo(dir: &Path) {
