@@ -17,15 +17,30 @@ fn test_sub_root_tags() {
 
     run_version(dir.path());
 
+    let root_paths = git_head_paths(dir.path());
     let root_tags = git_tags(dir.path());
     let root_message = git_head_message(dir.path());
     let nested_tags = git_tags(&dir.path().join("nested"));
     let nested_subject = git_head_subject(&dir.path().join("nested"));
 
+    assert!(root_paths.contains(&"nested".to_string()));
     assert_eq!(root_tags, vec!["sub-root-member@0.1.1", "v0.1.1"]);
     assert_eq!(nested_tags, vec!["v0.1.1"]);
     assert!(root_message.contains("External Packages:\nsub-root-nested@0.1.1"));
     assert_eq!(nested_subject, "Release v0.1.1");
+}
+
+#[test]
+#[serial]
+fn test_sub_root_amend_includes_submodule_pointer() {
+    let dir = setup_fixture("../fixtures/sub_root", &["nested"]);
+
+    run_version_with_args(dir.path(), &["--amend"]);
+
+    let root_paths = git_head_paths(dir.path());
+
+    assert_eq!(git_commit_count(dir.path()), 1);
+    assert!(root_paths.contains(&"nested".to_string()));
 }
 
 #[test]
@@ -67,22 +82,15 @@ fn test_non_independent_separate_repo_uses_repo_tag_label() {
 fn test_workspace_dependencies_are_updated_for_forced_independent_bump() {
     let dir = setup_fixture("../fixtures/sub_virtual_wsdeps", &["nested"]);
 
-    run_version_with_args(
-        dir.path(),
-        &["--force", "sub-virtual-wsdeps-nested"],
-    );
+    run_version_with_args(dir.path(), &["--force", "sub-virtual-wsdeps-nested"]);
     let root_message = git_head_message(dir.path());
 
-    assert!(
-        read_to_string(dir.path().join("Cargo.toml"))
-            .expect("read workspace manifest")
-            .contains(r#"sub-virtual-wsdeps-nested = { version = "0.1.1", path = "nested" }"#)
-    );
-    assert!(
-        read_to_string(dir.path().join("member/Cargo.toml"))
-            .expect("read member manifest")
-            .contains(r#"sub-virtual-wsdeps-nested = { workspace = true }"#)
-    );
+    assert!(read_to_string(dir.path().join("Cargo.toml"))
+        .expect("read workspace manifest")
+        .contains(r#"sub-virtual-wsdeps-nested = { version = "0.1.1", path = "nested" }"#));
+    assert!(read_to_string(dir.path().join("member/Cargo.toml"))
+        .expect("read member manifest")
+        .contains(r#"sub-virtual-wsdeps-nested = { workspace = true }"#));
     assert!(root_message.contains("External Packages:\nsub-virtual-wsdeps-nested@0.1.1"));
 }
 
@@ -93,9 +101,15 @@ fn test_root_commit_is_not_created_when_root_has_no_changes() {
 
     run_version(dir.path());
 
+    let status = git_status(dir.path());
+
     assert_eq!(git_commit_count(dir.path()), 1);
+    assert!(status.contains(&"M nested".to_string()));
     assert_eq!(git_tags(dir.path()), Vec::<String>::new());
-    assert_eq!(git_head_subject(&dir.path().join("nested")), "Release v0.1.1");
+    assert_eq!(
+        git_head_subject(&dir.path().join("nested")),
+        "Release v0.1.1"
+    );
 }
 
 #[test]
@@ -105,10 +119,12 @@ fn test_root_tracking_commit_is_optional_for_external_only_releases() {
 
     run_version_with_args(dir.path(), &["--root-tracking-commit"]);
 
+    let root_paths = git_head_paths(dir.path());
     let root_message = git_head_message(dir.path());
 
     assert_eq!(git_commit_count(dir.path()), 2);
     assert_eq!(git_head_subject(dir.path()), "Track external releases");
+    assert!(root_paths.contains(&"nested".to_string()));
     assert!(root_message.contains("External Packages:\nsub-only-nested@0.1.1"));
     assert_eq!(git_tags(dir.path()), Vec::<String>::new());
 }
@@ -186,10 +202,26 @@ fn git_head_message(dir: &Path) -> String {
     git(dir, &["log", "-1", "--pretty=%B"])
 }
 
+fn git_head_paths(dir: &Path) -> Vec<String> {
+    git(dir, &["show", "--pretty=format:", "--name-only", "HEAD"])
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| line.to_string())
+        .collect()
+}
+
 fn git_commit_count(dir: &Path) -> usize {
     git(dir, &["rev-list", "--count", "HEAD"])
         .parse()
         .expect("git commit count")
+}
+
+fn git_status(dir: &Path) -> Vec<String> {
+    git(dir, &["status", "--short"])
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| line.to_string())
+        .collect()
 }
 
 fn init_repo(dir: &Path) {

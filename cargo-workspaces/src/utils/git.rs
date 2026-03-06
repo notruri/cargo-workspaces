@@ -125,6 +125,147 @@ pub struct GitOpt {
 }
 
 impl GitOpt {
+    fn finalize_repo_commit(
+        &self,
+        root: &Utf8PathBuf,
+        workspace_root: &Utf8PathBuf,
+        new_version: &Option<Version>,
+        repo_versions: &Map<String, RepoVersion>,
+        branch: &str,
+        config: &WorkspaceConfig,
+    ) -> Result<(), Error> {
+        if !self.no_git_tag {
+            info!("version", format!("tagging in {}", root));
+            let has_global_tag =
+                !self.no_global_tag && root == workspace_root && new_version.is_some();
+
+            if has_global_tag {
+                if let Some(version) = new_version {
+                    let tag = format!("{}{}", &self.tag_prefix, version);
+                    self.tag(root, &tag, &tag)?;
+                }
+            }
+
+            if !(self.no_individual_tags || config.no_individual_tags.unwrap_or_default()) {
+                for (p, data) in repo_versions {
+                    if self.should_skip_individual_tag(workspace_root, root, data, has_global_tag) {
+                        continue;
+                    }
+
+                    let tag = self.individual_tag(workspace_root, root, p, &data.version);
+                    self.tag(root, &tag, &tag)?;
+                }
+            }
+        }
+
+        if !self.no_git_push {
+            info!("git", format!("pushing from {}", root));
+
+            let push_args = if self.no_git_tag {
+                vec!["push", &self.git_remote, branch]
+            } else {
+                vec!["push", "--follow-tags", &self.git_remote, branch]
+            };
+
+            let pushed = git(root, &push_args)?;
+
+            if !pushed.0.success() {
+                return Err(Error::NotPushed(pushed.1, pushed.2));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn commit_repo(
+        &self,
+        root: &Utf8PathBuf,
+        workspace_root: &Utf8PathBuf,
+        new_version: &Option<Version>,
+        repo_versions: &Map<String, RepoVersion>,
+        repo_external_versions: &Map<String, Version>,
+        branch: &str,
+        config: &WorkspaceConfig,
+        allow_empty: bool,
+        force_tracking_message: bool,
+        finalize: bool,
+    ) -> Result<bool, Error> {
+        info!("version", format!("committing changes in {}", root));
+
+        let added = git(root, &["add", "-u"])?;
+
+        if !added.0.success() {
+            return Err(Error::NotAdded(added.1, added.2));
+        }
+
+        let (staged_status, staged_out, _) = git(root, &["diff", "--cached", "--name-only"])?;
+
+        if !staged_status.success() {
+            return Err(Error::Bail);
+        }
+
+        if staged_out.is_empty() && !allow_empty {
+            return Ok(false);
+        }
+
+        let commit_versions = repo_versions
+            .iter()
+            .map(|(name, data)| (name.clone(), data.version.clone()))
+            .collect();
+
+        let mut args = vec!["commit".to_string()];
+
+        if allow_empty && staged_out.is_empty() {
+            args.push("--allow-empty".to_string());
+        }
+
+        if self.amend {
+            args.push("--amend".to_string());
+            args.push("--no-edit".to_string());
+        } else {
+            args.push("-m".to_string());
+
+            let mut msg = "Release %v";
+
+            if force_tracking_message {
+                msg = self
+                    .root_tracking_message
+                    .as_deref()
+                    .unwrap_or("Track external releases");
+            } else if let Some(supplied) = &self.message {
+                msg = supplied;
+            }
+
+            let mut msg = self.commit_msg(msg, &commit_versions, repo_external_versions);
+
+            let version_label =
+                self.commit_version_label(workspace_root, root, new_version, repo_versions);
+
+            msg = msg.replace("%v", &version_label);
+
+            args.push(msg);
+        }
+
+        let committed = git(root, &args.iter().map(|x| x.as_str()).collect::<Vec<_>>())?;
+
+        if !committed.0.success() {
+            return Err(Error::NotCommitted(committed.1, committed.2));
+        }
+
+        if finalize {
+            self.finalize_repo_commit(
+                root,
+                workspace_root,
+                new_version,
+                repo_versions,
+                branch,
+                config,
+            )?;
+        }
+
+        Ok(true)
+    }
+
     pub fn validate(
         &self,
         roots: &[Utf8PathBuf],
@@ -232,136 +373,114 @@ impl GitOpt {
         config: &WorkspaceConfig,
     ) -> Result<(), Error> {
         if !self.no_git_commit {
-            for root in roots {
-                info!("version", format!("committing changes in {}", root));
+            let mut ordered_roots = roots.to_vec();
+            ordered_roots.sort_by(|left, right| {
+                right
+                    .components()
+                    .count()
+                    .cmp(&left.components().count())
+                    .then_with(|| left.cmp(right))
+            });
 
+            let workspace_branch = branches.get(workspace_root).expect(INTERNAL_ERR);
+            let workspace_versions = new_versions
+                .get(workspace_root)
+                .cloned()
+                .unwrap_or_default();
+            let workspace_external_versions = external_versions
+                .get(workspace_root)
+                .cloned()
+                .unwrap_or_default();
+
+            let added = git(workspace_root, &["add", "-u"])?;
+
+            if !added.0.success() {
+                return Err(Error::NotAdded(added.1, added.2));
+            }
+
+            let (staged_status, staged_out, _) =
+                git(workspace_root, &["diff", "--cached", "--name-only"])?;
+
+            if !staged_status.success() {
+                return Err(Error::Bail);
+            }
+
+            let should_commit_workspace_root = !staged_out.is_empty()
+                || (self.root_tracking_commit && !workspace_external_versions.is_empty());
+            let workspace_tracking_only = staged_out.is_empty()
+                && self.root_tracking_commit
+                && !workspace_external_versions.is_empty();
+            let mut amended_workspace_root = false;
+
+            if self.amend && !workspace_tracking_only && should_commit_workspace_root {
+                amended_workspace_root = self.commit_repo(
+                    workspace_root,
+                    workspace_root,
+                    new_version,
+                    &workspace_versions,
+                    &workspace_external_versions,
+                    workspace_branch,
+                    config,
+                    false,
+                    false,
+                    false,
+                )?;
+            }
+
+            for root in ordered_roots.iter().filter(|root| *root != workspace_root) {
                 let branch = branches.get(root).expect(INTERNAL_ERR);
-                let added = git(root, &["add", "-u"])?;
-
-                if !added.0.success() {
-                    return Err(Error::NotAdded(added.1, added.2));
-                }
-
-                let (staged_status, staged_out, _) =
-                    git(root, &["diff", "--cached", "--name-only"])?;
-
-                if !staged_status.success() {
-                    return Err(Error::Bail);
-                }
-
-                if staged_out.is_empty() {
-                    let repo_external_versions =
-                        external_versions.get(root).cloned().unwrap_or_default();
-                    let is_tracking_commit = self.root_tracking_commit
-                        && root == workspace_root
-                        && !repo_external_versions.is_empty();
-
-                    if !is_tracking_commit {
-                        continue;
-                    }
-
-                    let mut args = vec!["commit".to_string(), "--allow-empty".to_string()];
-                    args.push("-m".to_string());
-
-                    let tracking_msg = self
-                        .root_tracking_message
-                        .as_deref()
-                        .unwrap_or("Track external releases");
-                    let msg = self.commit_msg(tracking_msg, &Map::new(), &repo_external_versions);
-                    args.push(msg);
-
-                    let committed = git(root, &args.iter().map(|x| x.as_str()).collect::<Vec<_>>())?;
-
-                    if !committed.0.success() {
-                        return Err(Error::NotCommitted(committed.1, committed.2));
-                    }
-
-                    if !self.no_git_push {
-                        info!("git", format!("pushing from {}", root));
-
-                        let pushed = git(root, &["push", &self.git_remote, branch])?;
-
-                        if !pushed.0.success() {
-                            return Err(Error::NotPushed(pushed.1, pushed.2));
-                        }
-                    }
-
-                    continue;
-                }
-
                 let repo_versions = new_versions.get(root).cloned().unwrap_or_default();
-                let commit_versions = repo_versions
-                    .iter()
-                    .map(|(name, data)| (name.clone(), data.version.clone()))
-                    .collect();
                 let repo_external_versions =
                     external_versions.get(root).cloned().unwrap_or_default();
 
-                let mut args = vec!["commit".to_string()];
+                self.commit_repo(
+                    root,
+                    workspace_root,
+                    new_version,
+                    &repo_versions,
+                    &repo_external_versions,
+                    branch,
+                    config,
+                    false,
+                    false,
+                    true,
+                )?;
+            }
 
-                if self.amend {
-                    args.push("--amend".to_string());
-                    args.push("--no-edit".to_string());
-                } else {
-                    args.push("-m".to_string());
-
-                    let mut msg = "Release %v";
-
-                    if let Some(supplied) = &self.message {
-                        msg = supplied;
-                    }
-
-                    let mut msg =
-                        self.commit_msg(msg, &commit_versions, &repo_external_versions);
-
-                    let version_label =
-                        self.commit_version_label(workspace_root, root, new_version, &repo_versions);
-
-                    msg = msg.replace("%v", &version_label);
-
-                    args.push(msg);
-                }
-
-                let committed = git(root, &args.iter().map(|x| x.as_str()).collect::<Vec<_>>())?;
-
-                if !committed.0.success() {
-                    return Err(Error::NotCommitted(committed.1, committed.2));
-                }
-
-                if !self.no_git_tag {
-                    info!("version", format!("tagging in {}", root));
-                    let has_global_tag =
-                        !self.no_global_tag && root == workspace_root && new_version.is_some();
-
-                    if has_global_tag {
-                        if let Some(version) = new_version {
-                            let tag = format!("{}{}", &self.tag_prefix, version);
-                            self.tag(root, &tag, &tag)?;
-                        }
-                    }
-
-                    if !(self.no_individual_tags || config.no_individual_tags.unwrap_or_default()) {
-                        for (p, data) in &repo_versions {
-                            if self.should_skip_individual_tag(workspace_root, root, data, has_global_tag)
-                            {
-                                continue;
-                            }
-
-                            let tag = self.individual_tag(workspace_root, root, p, &data.version);
-                            self.tag(root, &tag, &tag)?;
-                        }
-                    }
-                }
-
-                if !self.no_git_push {
-                    info!("git", format!("pushing from {}", root));
-
-                    let pushed = git(root, &["push", "--follow-tags", &self.git_remote, branch])?;
-
-                    if !pushed.0.success() {
-                        return Err(Error::NotPushed(pushed.1, pushed.2));
-                    }
-                }
+            if self.amend && amended_workspace_root {
+                self.commit_repo(
+                    workspace_root,
+                    workspace_root,
+                    new_version,
+                    &workspace_versions,
+                    &workspace_external_versions,
+                    workspace_branch,
+                    config,
+                    false,
+                    false,
+                    false,
+                )?;
+                self.finalize_repo_commit(
+                    workspace_root,
+                    workspace_root,
+                    new_version,
+                    &workspace_versions,
+                    workspace_branch,
+                    config,
+                )?;
+            } else if should_commit_workspace_root {
+                self.commit_repo(
+                    workspace_root,
+                    workspace_root,
+                    new_version,
+                    &workspace_versions,
+                    &workspace_external_versions,
+                    workspace_branch,
+                    config,
+                    workspace_tracking_only,
+                    workspace_tracking_only,
+                    true,
+                )?;
             }
         }
 
